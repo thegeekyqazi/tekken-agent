@@ -22,10 +22,23 @@ An API round-trip is 1–3 s; Tekken runs at 60 fps. So the model doesn't press 
 sudo dnf install grim python3-devel   # grim is likely already on Hyprland
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-### 2. uinput permissions (one-time)
+### 2. Configuration
+
+Copy the example environment file and configure your API keys:
+
+```bash
+cp .env.example .env
+# Edit .env and set your ANTHROPIC_API_KEY or configure an alternative backend
+```
+
+The `.env.example` file includes:
+- Anthropic API configuration (default backend)
+- OpenAI-compatible backend options (OpenRouter, Ollama, LM Studio, vLLM)
+- Optional agent behavior overrides (cycle count, screenshot size, etc.)
+
+### 3. uinput permissions (one-time)
 
 The virtual pad needs write access to `/dev/uinput`:
 
@@ -39,7 +52,7 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 echo uinput | sudo tee /etc/modules-load.d/uinput.conf   # load on boot
 ```
 
-### 3. Bind the pad in RPCS3 (one-time)
+### 4. Bind the pad in RPCS3 (one-time)
 
 ```bash
 python test_pad.py   # creates "Tekken Agent Pad" and cycles inputs for ~15s
@@ -49,7 +62,7 @@ While it's running, open RPCS3 → **Pads** → Player 1 → Handler: **evdev** 
 
 You can verify inputs independently with `evtest` (select the Tekken Agent Pad device).
 
-### 4. Run
+### 5. Run
 
 Boot Tekken 6 in RPCS3 (windowed or fullscreen — the capture module finds the RPCS3 window via `hyprctl` and crops to it), then:
 
@@ -78,23 +91,34 @@ Add character-specific combos by extending `MACROS` in `tekken_harness/moves.py`
 
 ## Using other providers (OpenAI-compatible APIs)
 
-The backend is pluggable via env vars — anything exposing an OpenAI-compatible `/v1/chat/completions` works (OpenRouter, Ollama, vLLM, LM Studio, llama.cpp server), as long as the model is **vision-capable**:
+The backend is pluggable via `.env` configuration — anything exposing an OpenAI-compatible `/v1/chat/completions` works (OpenRouter, Ollama, vLLM, LM Studio, llama.cpp server), as long as the model is **vision-capable**.
+
+Edit your `.env` file and set:
 
 ```bash
-# OpenRouter
-export TEKKEN_AGENT_BACKEND=openai
-export OPENAI_BASE_URL=https://openrouter.ai/api/v1
-export OPENAI_API_KEY=sk-or-...
-export TEKKEN_AGENT_MODEL=google/gemini-2.0-flash-001
-
-# Ollama (local — model must be a VLM: qwen2.5-vl, llava, gemma3, minicpm-v)
-export TEKKEN_AGENT_BACKEND=openai
-export OPENAI_BASE_URL=http://localhost:11434/v1
-export OPENAI_API_KEY=ollama
-export TEKKEN_AGENT_MODEL=qwen2.5-vl:7b
+TEKKEN_AGENT_BACKEND=openai
 ```
 
-Default backend is Anthropic (`ANTHROPIC_API_KEY`). The JSON parser already strips code fences and extracts the first `{...}` block, which covers most local models' formatting quirks — but small local VLMs read game HUDs much less reliably than frontier models, so expect weaker play.
+Then configure one of these options:
+
+**OpenRouter**
+```bash
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
+OPENAI_API_KEY=sk-or-xxxxx
+TEKKEN_AGENT_MODEL=google/gemini-2.0-flash-001
+```
+
+**Ollama (local VLM)**
+```bash
+OPENAI_BASE_URL=http://localhost:11434/v1
+OPENAI_API_KEY=ollama
+TEKKEN_AGENT_MODEL=qwen2.5-vl:7b
+```
+
+**LM Studio / vLLM / llama.cpp**  
+See `.env.example` for additional provider templates.
+
+The JSON parser strips code fences and extracts the first `{...}` block, covering most local models' formatting quirks — but small local VLMs read game HUDs less reliably than frontier models, so expect weaker play.
 
 ## Tuning knobs
 
