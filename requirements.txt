@@ -1,0 +1,4 @@
+evdev>=1.7
+Pillow>=10
+anthropic>=0.40   ; # default backend
+openai>=1.40      ; # only needed for TEKKEN_AGENT_BACKEND=openai
