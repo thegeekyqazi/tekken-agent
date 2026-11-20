@@ -1,15 +1,18 @@
 """
-Virtual gamepad for RPCS3 via Linux uinput.
+Virtual gamepad for RPCS3 or DuckStation via Linux uinput.
 
-Creates a virtual evdev gamepad ("Tekken Agent Pad") that RPCS3's evdev pad
-handler can bind to like any physical controller. All Tekken inputs are
-expressed as PS-style buttons:
+Creates a virtual evdev gamepad ("Tekken Agent Pad") that emulators can bind
+to like any physical controller. All Tekken inputs are expressed as PS-style
+buttons:
 
     1 (LP) -> Square      2 (RP) -> Triangle
     3 (LK) -> Cross       4 (RK) -> Circle
 
 Directions go out on the d-pad hat axes (ABS_HAT0X / ABS_HAT0Y), which is
 what Tekken reads by default.
+
+RPCS3 mode: Uses PS3 DualShock 3 vendor/product IDs for evdev handler.
+DuckStation mode: Uses Xbox 360 IDs + trigger axes for better SDL compatibility.
 
 Requires: /dev/uinput writable by the current user (see README).
 """
@@ -40,6 +43,34 @@ BUTTONS = {
     "r3":       e.BTN_THUMBR,
 }
 
+# DuckStation reads the pad through SDL's GameController API, which identifies
+# buttons by *index* (ascending evdev code order) and then applies its built-in
+# Xbox 360 mapping (we fake an x360 GUID). Two consequences:
+#   - The key set must match a real x360 pad EXACTLY. In particular BTN_TL2 /
+#     BTN_TR2 must NOT exist as keys (real x360 triggers are axes only) — their
+#     presence shifts every later button index, so Start lands on "LeftStick"
+#     and Select on "Guide", i.e. Start/Select go dead in-game.
+#   - SDL "X" (-> PS Square) is BTN_X == BTN_NORTH, and SDL "Y" (-> PS Triangle)
+#     is BTN_Y == BTN_WEST, the opposite of the PS-style table above.
+SDL_BUTTONS = {
+    "square":   e.BTN_NORTH,   # SDL X  -> Square
+    "triangle": e.BTN_WEST,    # SDL Y  -> Triangle
+    "cross":    e.BTN_SOUTH,   # SDL A  -> Cross
+    "circle":   e.BTN_EAST,    # SDL B  -> Circle
+    "l1":       e.BTN_TL,
+    "r1":       e.BTN_TR,
+    "select":   e.BTN_SELECT,
+    "start":    e.BTN_START,
+    "l3":       e.BTN_THUMBL,
+    "r3":       e.BTN_THUMBR,
+}
+
+# In SDL mode L2/R2 are analog trigger axes, not buttons.
+SDL_TRIGGERS = {
+    "l2": e.ABS_Z,
+    "r2": e.ABS_RZ,
+}
+
 # Tekken numeric notation -> button name
 TEKKEN_BUTTONS = {
     "1": "square",
@@ -63,22 +94,62 @@ DIRECTIONS = {
 
 
 class VirtualPad:
-    def __init__(self, name: str = "Tekken Agent Pad", p1_side: str = "left"):
-        """p1_side: 'left' means f=right on screen. Flip if the agent is on the right."""
+    def __init__(self, name: str = "Tekken Agent Pad", p1_side: str = "left", emulator: str = "rpcs3"):
+        """
+        Create a virtual gamepad compatible with RPCS3 or DuckStation.
+
+        Args:
+            name: Device name shown in system
+            p1_side: 'left' means f=right on screen. Flip if the agent is on the right.
+            emulator: 'rpcs3' (uses evdev directly) or 'duckstation' (SDL-compatible)
+        """
         self.flip = p1_side == "right"
-        cap = {
-            e.EV_KEY: list(BUTTONS.values()),
-            e.EV_ABS: [
-                (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
-                (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
-                (e.ABS_X, AbsInfo(128, 0, 255, 0, 15, 0)),
-                (e.ABS_Y, AbsInfo(128, 0, 255, 0, 15, 0)),
-                (e.ABS_RX, AbsInfo(128, 0, 255, 0, 15, 0)),
-                (e.ABS_RY, AbsInfo(128, 0, 255, 0, 15, 0)),
-            ],
-        }
-        self.ui = UInput(cap, name=name, vendor=0x054C, product=0x0268)
-        # Give RPCS3/udev a moment to register the device on first creation.
+        self.emulator = emulator.lower()
+
+        if self.emulator == "duckstation":
+            # Mimic a real wired Xbox 360 pad (xpad driver) exactly, so SDL's
+            # built-in mapping for the x360 GUID lines up index-for-index:
+            # 11 buttons (no BTN_TL2/TR2!), sticks -32768..32767, triggers on
+            # ABS_Z/RZ, d-pad on the hat.
+            self.buttons = SDL_BUTTONS
+            self.triggers = SDL_TRIGGERS
+            self.stick_center = 0
+            cap = {
+                e.EV_KEY: list(SDL_BUTTONS.values()) + [e.BTN_MODE],
+                e.EV_ABS: [
+                    (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
+                    (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
+                    (e.ABS_X, AbsInfo(0, -32768, 32767, 16, 128, 0)),
+                    (e.ABS_Y, AbsInfo(0, -32768, 32767, 16, 128, 0)),
+                    (e.ABS_RX, AbsInfo(0, -32768, 32767, 16, 128, 0)),
+                    (e.ABS_RY, AbsInfo(0, -32768, 32767, 16, 128, 0)),
+                    (e.ABS_Z, AbsInfo(0, 0, 255, 0, 0, 0)),   # L2 trigger
+                    (e.ABS_RZ, AbsInfo(0, 0, 255, 0, 0, 0)),  # R2 trigger
+                ],
+            }
+            self.ui = UInput(cap, name=name, vendor=0x045E, product=0x028E,
+                             version=0x0110, bustype=e.BUS_USB)
+        else:
+            # RPCS3 evdev handler: buttons are bound manually in the GUI, so
+            # only consistency matters, not SDL's index conventions.
+            self.buttons = BUTTONS
+            self.triggers = {}
+            self.stick_center = 128
+            cap = {
+                e.EV_KEY: list(BUTTONS.values()),
+                e.EV_ABS: [
+                    (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
+                    (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
+                    (e.ABS_X, AbsInfo(128, 0, 255, 0, 15, 0)),
+                    (e.ABS_Y, AbsInfo(128, 0, 255, 0, 15, 0)),
+                    (e.ABS_RX, AbsInfo(128, 0, 255, 0, 15, 0)),
+                    (e.ABS_RY, AbsInfo(128, 0, 255, 0, 15, 0)),
+                ],
+            }
+            # PS3 DualShock 3 IDs
+            self.ui = UInput(cap, name=name, vendor=0x054C, product=0x0268)
+
+        # Give emulator/udev a moment to register the device on first creation.
         time.sleep(0.5)
         self.neutral()
 
@@ -97,20 +168,34 @@ class VirtualPad:
 
     def press(self, *names: str):
         for n in names:
-            self.ui.write(e.EV_KEY, BUTTONS[n], 1)
+            if n in self.triggers:  # analog trigger in SDL mode
+                self.ui.write(e.EV_ABS, self.triggers[n], 255)
+            else:
+                self.ui.write(e.EV_KEY, self.buttons[n], 1)
         self._syn()
 
     def release(self, *names: str):
         for n in names:
-            self.ui.write(e.EV_KEY, BUTTONS[n], 0)
+            if n in self.triggers:
+                self.ui.write(e.EV_ABS, self.triggers[n], 0)
+            else:
+                self.ui.write(e.EV_KEY, self.buttons[n], 0)
         self._syn()
 
     def neutral(self):
-        """Release everything."""
-        for code in BUTTONS.values():
+        """Release everything and center all axes."""
+        for code in self.buttons.values():
             self.ui.write(e.EV_KEY, code, 0)
         self.ui.write(e.EV_ABS, e.ABS_HAT0X, 0)
         self.ui.write(e.EV_ABS, e.ABS_HAT0Y, 0)
+        # Center analog sticks
+        self.ui.write(e.EV_ABS, e.ABS_X, self.stick_center)
+        self.ui.write(e.EV_ABS, e.ABS_Y, self.stick_center)
+        self.ui.write(e.EV_ABS, e.ABS_RX, self.stick_center)
+        self.ui.write(e.EV_ABS, e.ABS_RY, self.stick_center)
+        # Reset triggers (SDL mode)
+        for code in self.triggers.values():
+            self.ui.write(e.EV_ABS, code, 0)
         self._syn()
 
     # ---------- timed primitives ----------

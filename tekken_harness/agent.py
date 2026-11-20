@@ -13,6 +13,8 @@ Two modes:
   fight - in-round decision making
 The model itself reports which mode it thinks it's in, so it can drive from
 boot screen all the way into matches.
+
+Supports: Tekken 6 (RPCS3) and Tekken 3 (DuckStation)
 """
 
 from __future__ import annotations
@@ -21,16 +23,17 @@ import argparse
 import json
 import os
 import re
-import sys
 import time
 from collections import deque
 
 from .capture import capture_b64
 from .controller import VirtualPad
-from .llm import LLM, default_model
+from .llm import LLM
 from .moves import execute_plan, MACROS
 
-SYSTEM_PROMPT = f"""You are an agent playing Tekken 6 on a PS3 emulator (RPCS3). \
+GAME = os.environ.get("TEKKEN_GAME", "tekken6").lower()
+
+SYSTEM_PROMPT_TEKKEN6 = f"""You are an agent playing Tekken 6 on a PS3 emulator (RPCS3). \
 You see a screenshot of the game each turn and respond with controller actions.
 
 You are PLAYER 1. Your character is normally on the LEFT side of the screen \
@@ -64,6 +67,47 @@ In menus: use menu_up/menu_down/menu_left/menu_right, confirm, back, start. \
 To reach a quick fight from the main menu, Arcade Battle or Practice are good targets. \
 If a screen says "press start", send ["start"]."""
 
+SYSTEM_PROMPT_TEKKEN3 = f"""You are an agent playing Tekken 3 on a PS1 emulator (DuckStation). \
+You see a screenshot of the game each turn and respond with controller actions.
+
+You are PLAYER 1. Your character is normally on the LEFT side of the screen \
+(check the health bar: yours is the LEFT bar).
+
+ACTION LANGUAGE (Tekken notation):
+- Directions: f, b, u, d, df, db, uf, ub (f = toward opponent)
+- Buttons: 1=left punch, 2=right punch, 3=left kick, 4=right kick
+- Combine with '+': "df+2", "b+1+2". Sequence with commas: "f, f, 2" or "1, 2".
+- "hold <dir> <frames>" e.g. "hold b 30"
+- Macros: {", ".join(sorted(MACROS.keys()))}
+
+RESPOND WITH ONLY a JSON object, no markdown fences:
+{{
+  "mode": "menu" | "fight" | "loading",
+  "observation": "one sentence: what's on screen (health, range, opponent state)",
+  "plan": ["action1", "action2", ...],
+  "reasoning": "one sentence why"
+}}
+
+Rules of thumb in fights (Tekken 3 is faster and more aggressive than later games):
+- At range: "ff" to close, or "df+2" on approach.
+- Up close: jab strings "1, 2", quick low "d+3" or "d+4", launcher "df+2", hopkick "uf+4".
+- If you just got hit or opponent is attacking: "block_high" or "block_low".
+- If knocked down: "getup".
+- Tekken 3 rewards aggression — stay close and pressure with strings.
+- Don't repeat the exact same plan more than twice in a row — mix highs/lows/throws.
+- Keep plans short: 1-3 actions in fights (the screen changes fast), up to 5 in menus.
+- mode "loading": empty plan, just wait.
+
+In menus: use menu_up/menu_down/menu_left/menu_right, confirm, back, start. \
+To reach a quick fight from the main menu, Arcade or VS Mode are good targets. \
+If a screen says "press start", send ["start"]."""
+
+def get_system_prompt() -> str:
+    """Return the appropriate system prompt based on TEKKEN_GAME env var."""
+    if GAME == "tekken3":
+        return SYSTEM_PROMPT_TEKKEN3
+    return SYSTEM_PROMPT_TEKKEN6
+
 
 def parse_response(text: str) -> dict:
     text = text.strip()
@@ -80,29 +124,37 @@ def parse_response(text: str) -> dict:
 
 def run(max_cycles: int, p1_side: str, dry_run: bool, no_wait: bool = False):
     llm = LLM()  # backend/model from TEKKEN_AGENT_BACKEND / TEKKEN_AGENT_MODEL
-    pad = None if dry_run else VirtualPad(p1_side=p1_side)
+    emulator = os.environ.get("TEKKEN_EMULATOR", "rpcs3").lower()
+    pad = None if dry_run else VirtualPad(p1_side=p1_side, emulator=emulator)
     history: deque[str] = deque(maxlen=6)
+    system_prompt = get_system_prompt()
 
-    print(f"[harness] backend={llm.backend} model={llm.model} dry_run={dry_run}")
+    emulator_name = emulator.upper()
+    game_name = GAME.upper()
+
+    print(f"[harness] emulator={emulator_name} game={game_name} backend={llm.backend} model={llm.model} dry_run={dry_run}")
     if not dry_run:
-        print("[harness] Virtual pad created and will stay alive for this whole session.")
+        print(f"[harness] Virtual pad created and will stay alive for this whole session.")
         if not no_wait:
             print(
-                "\n  1. Launch RPCS3 NOW (or open Pads if it's already running)\n"
-                "  2. Pads -> Player 1 -> Handler: Evdev -> Device: 'Tekken Agent Pad'\n"
-                "     It must NOT say '(disconnected)'. Click Save.\n"
-                "  3. Boot Tekken 6 and let the intro start playing.\n"
-                "     IMPORTANT: don't touch your keyboard/other controller in-game —\n"
-                "     whoever presses Start first gets claimed as P1 by Tekken.\n"
-                "  4. Press Enter below: the pad itself will press Start and then Cross\n"
-                "     (skip intro -> title screen -> menu), claiming P1, then\n"
-                "     tap d-pad up/down 3x as a sanity check.\n"
+                f"\n  1. Launch {emulator_name} NOW (or open controller config if it's already running)\n"
+                f"  2. Configure controller binding:\n"
+                f"     RPCS3: Pads -> Player 1 -> Handler: Evdev -> Device: 'Tekken Agent Pad'\n"
+                f"     DuckStation: Settings -> Controllers -> Port 1 -> Type: Digital Controller\n"
+                f"                  Then map to 'Tekken Agent Pad' in controller settings\n"
+                f"     It must NOT say '(disconnected)'. Save the configuration.\n"
+                f"  3. Boot {game_name} and let the intro start playing.\n"
+                f"     IMPORTANT: don't touch your keyboard/other controller in-game —\n"
+                f"     whoever presses Start first gets claimed as P1.\n"
+                f"  4. Press Enter below: the pad itself will press Start and then Cross\n"
+                f"     (skip intro -> title screen -> menu), claiming P1, then\n"
+                f"     tap d-pad up/down 3x as a sanity check.\n"
             )
-            input("  Press Enter when Tekken's intro is playing... ")
+            input(f"  Press Enter when {game_name}'s intro is playing... ")
             print("  Pressing Start to skip intro...")
             pad.tap(["start"], frames=6)
             time.sleep(4.0)  # wait for title screen to appear
-            print("  Pressing Cross to set Left side...")
+            print("  Pressing Cross to proceed...")
             pad.tap(["cross"], frames=6)
             time.sleep(3.0)  # wait for main menu
             print("  Tapping d-pad up/down 3x — watch the menu cursor...")
@@ -111,9 +163,9 @@ def run(max_cycles: int, p1_side: str, dry_run: bool, no_wait: bool = False):
                 pad.hold(6, direction="u"); time.sleep(0.25)
             resp = input("  Did the menu cursor move up/down? [y/N] ").strip().lower()
             if resp != "y":
-                print("  Binding not working — check Pads config (device must be 'Tekken Agent Pad',\n"
-                      "  handler Evdev, Player 1 tab, then Save) and re-run. If the cursor moved but\n"
-                      "  you're unsure, 'y' is safe: the agent re-checks the screen every cycle.")
+                print(f"  Binding not working — check {emulator_name} controller config and re-run.\n"
+                      f"  If the cursor moved but you're unsure, 'y' is safe: the agent\n"
+                      f"  re-checks the screen every cycle.")
                 pad.close()
                 return
             print("[harness] Binding confirmed, P1 claimed. Starting agent loop.\n")
@@ -125,7 +177,7 @@ def run(max_cycles: int, p1_side: str, dry_run: bool, no_wait: bool = False):
 
             hist_text = "\n".join(history) if history else "(none yet)"
             raw = llm.complete(
-                system=SYSTEM_PROMPT,
+                system=system_prompt,
                 text=f"Cycle {cycle}. Your recent plans:\n{hist_text}\n\nCurrent frame attached. Respond with JSON only.",
                 image_b64=img_b64,
                 media_type=media,
@@ -162,7 +214,7 @@ def run(max_cycles: int, p1_side: str, dry_run: bool, no_wait: bool = False):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="LLM agent harness for Tekken 6 on RPCS3")
+    ap = argparse.ArgumentParser(description="LLM agent harness for Tekken (RPCS3 / DuckStation)")
     ap.add_argument("--cycles", type=int, default=200, help="max see-think-act cycles")
     ap.add_argument("--side", choices=["left", "right"], default="left",
                     help="which side P1 starts on (controls f/b orientation)")

@@ -1,13 +1,17 @@
-# Tekken 6 Agent Harness (RPCS3)
+# Tekken Agent Harness (RPCS3 / DuckStation)
 
-A see → think → act loop that lets a Claude vision model play Tekken 6 through RPCS3 on Linux. The harness creates a **virtual evdev gamepad** that RPCS3 treats as a real PS3 controller, screenshots the game window each cycle, asks the model for a short plan in Tekken notation, and executes it with frame-accurate timing.
+A see → think → act loop that lets a Claude vision model play Tekken through emulators on Linux. The harness creates a **virtual evdev gamepad** that emulators treat as a real controller, screenshots the game window each cycle, asks the model for a short plan in Tekken notation, and executes it with frame-accurate timing.
+
+**Supported:**
+- **Tekken 6** via RPCS3 (PS3 emulator)
+- **Tekken 3** via DuckStation (PS1 emulator)
 
 ```
-┌──────────┐   grim (Hyprland)   ┌──────────────┐   JSON plan    ┌─────────────┐
-│  RPCS3   │ ──── screenshot ──▶ │ Claude (API) │ ─────────────▶ │ moves.py    │
-│ Tekken 6 │                     └──────────────┘  ["df+2","1,2"]│ frame timing│
-│          │ ◀──── /dev/uinput virtual gamepad ◀──────────────── └─────────────┘
-└──────────┘
+┌──────────────┐   grim (Hyprland)   ┌──────────────┐   JSON plan    ┌─────────────┐
+│ RPCS3 or     │ ──── screenshot ──▶ │ Claude (API) │ ─────────────▶ │ moves.py    │
+│ DuckStation  │                     └──────────────┘  ["df+2","1,2"]│ frame timing│
+│ Tekken 3/6   │ ◀──── /dev/uinput virtual gamepad ◀──────────────── └─────────────┘
+└──────────────┘
 ```
 
 ## Why plans instead of per-frame input
@@ -34,6 +38,8 @@ cp .env.example .env
 ```
 
 The `.env.example` file includes:
+- Emulator selection: `TEKKEN_EMULATOR` (rpcs3 or duckstation)
+- Game selection: `TEKKEN_GAME` (tekken6 or tekken3)
 - Anthropic API configuration (default backend)
 - OpenAI-compatible backend options (OpenRouter, Ollama, LM Studio, vLLM)
 - Optional agent behavior overrides (cycle count, screenshot size, etc.)
@@ -52,20 +58,31 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 echo uinput | sudo tee /etc/modules-load.d/uinput.conf   # load on boot
 ```
 
-### 4. Bind the pad in RPCS3 (one-time)
+### 4. Bind the pad in your emulator (one-time)
 
+**For RPCS3 (Tekken 6):**
 ```bash
 python test_pad.py   # creates "Tekken Agent Pad" and cycles inputs for ~15s
 ```
 
 While it's running, open RPCS3 → **Pads** → Player 1 → Handler: **evdev** → Device: **Tekken Agent Pad**. Map it like a standard pad (the test script's button cycle makes "press the button to bind" mapping easy — re-run it as needed). Save. Tekken defaults: Square=1 (LP), Triangle=2 (RP), Cross=3 (LK), Circle=4 (RK), d-pad for movement.
 
+**For DuckStation (Tekken 3):**
+```bash
+TEKKEN_EMULATOR=duckstation python test_pad.py   # creates "Tekken Agent Pad" (SDL-compatible)
+```
+
+While it's running, open DuckStation → **Settings** → **Controllers** → Port 1 → Type: **Digital Controller** or **Analog Controller (DualShock)**. Click **Automatic Mapping** and select **Tekken Agent Pad** from the device list. The controller uses Xbox 360 IDs for maximum SDL compatibility. Save settings.
+
+**Note**: DuckStation mode uses different vendor/product IDs (Xbox 360) than RPCS3 mode (PS3). See `DUCKSTATION_FIX.md` for technical details.
+
 You can verify inputs independently with `evtest` (select the Tekken Agent Pad device).
 
 ### 5. Run
 
-Boot Tekken 6 in RPCS3 (windowed or fullscreen — the capture module finds the RPCS3 window via `hyprctl` and crops to it), then:
+Boot your game in the emulator (windowed or fullscreen — the capture module finds the window via `hyprctl` and crops to it), then:
 
+**Tekken 6 (RPCS3) - default:**
 ```bash
 python -m tekken_harness.agent                  # default: 200 cycles, P1 on left
 python -m tekken_harness.agent --dry-run        # capture + model output, no inputs
@@ -73,7 +90,16 @@ python -m tekken_harness.agent --side right     # if your character is on the ri
 python -m tekken_harness.agent --cycles 50
 ```
 
-The agent reports a mode each cycle (`menu` / `fight` / `loading`), so you can start it at the title screen and it will navigate into Arcade Battle by itself.
+**Tekken 3 (DuckStation):**
+```bash
+# Set in .env first:
+# TEKKEN_EMULATOR=duckstation
+# TEKKEN_GAME=tekken3
+
+python -m tekken_harness.agent                  # same args as above
+```
+
+The agent reports a mode each cycle (`menu` / `fight` / `loading`), so you can start it at the title screen and it will navigate into Arcade/VS Mode by itself.
 
 ## Action language the model uses
 
@@ -129,7 +155,9 @@ The JSON parser strips code fences and extracts the first `{...}` block, coverin
 
 ## Troubleshooting
 
-- **Pad doesn't show in RPCS3:** check `groups` includes `input`; re-run `test_pad.py` while the Pads dialog is open (RPCS3 only lists currently-present devices).
-- **Black/wrong screenshots:** if RPCS3 runs fullscreen on another monitor, grim grabs the window region reported by Hyprland — check `hyprctl clients | grep -i rpcs3`. Some Vulkan fullscreen modes don't composite; use borderless/windowed.
-- **Inputs registering but moves whiffing:** raise `DEFAULT_TAP_FRAMES` to 5–6; RPCS3 input latency varies with frame pacing.
+- **Pad doesn't show in emulator:** check `groups` includes `input`; re-run `test_pad.py` (with `TEKKEN_EMULATOR=duckstation` for DuckStation) while the controller config dialog is open (emulators only list currently-present devices).
+- **DuckStation: pad detected but inputs don't work:** Ensure you're using DuckStation mode: `TEKKEN_EMULATOR=duckstation python test_pad.py`. The virtual pad creates `/dev/input/js0` (appears as **sdl-0** in DuckStation). See `DUCKSTATION_TROUBLESHOOTING.md` for detailed steps.
+- **Black/wrong screenshots:** if the emulator runs fullscreen on another monitor, grim grabs the window region reported by Hyprland — check `hyprctl clients | grep -i rpcs3` or `grep -i duckstation`. Some Vulkan fullscreen modes don't composite; use borderless/windowed.
+- **Inputs registering but moves whiffing:** raise `DEFAULT_TAP_FRAMES` to 5–6 in `moves.py`; emulator input latency varies with frame pacing.
 - **Sides swapped mid-match:** the model is told to check the left health bar; you can also restart with `--side right`.
+- **DuckStation not detected:** ensure the window title contains "duckstation" or set the window class appropriately. Check with `hyprctl clients`.

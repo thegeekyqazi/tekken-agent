@@ -62,3 +62,4 @@ recordings/
 # Uncomment if you want to ignore API keys stored in files
 # anthropic_api_key.txt
 # openai_api_key.txt
+CHANGES.md

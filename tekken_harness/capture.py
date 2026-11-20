@@ -1,12 +1,14 @@
 """
-Capture the RPCS3 game window as a JPEG for the vision model.
+Capture the emulator game window as a JPEG for the vision model.
 
-Primary path (your setup): Hyprland -> hyprctl clients to locate the RPCS3
+Supports: RPCS3 (PS3) and DuckStation (PS1)
+
+Primary path (Hyprland): hyprctl clients to locate the emulator
 window geometry, then grim to grab that region of the screen.
 
 Fallback: full-screen grab (grim -o or scrot/maim on X11).
 
-Returns (jpeg_bytes, media_type) ready to base64 into the Anthropic API.
+Returns (jpeg_bytes, media_type) ready to base64 into the API.
 """
 
 from __future__ import annotations
@@ -14,13 +16,15 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import shutil
 import subprocess
 
 from PIL import Image
 
-MAX_WIDTH = 1024  # downscale before sending to the model
-JPEG_QUALITY = 80
+MAX_WIDTH = int(os.environ.get("TEKKEN_AGENT_MAX_WIDTH", "1024"))
+JPEG_QUALITY = int(os.environ.get("TEKKEN_AGENT_JPEG_QUALITY", "80"))
+EMULATOR = os.environ.get("TEKKEN_EMULATOR", "rpcs3").lower()
 
 
 def _hyprctl_json(*args: str):
@@ -31,13 +35,16 @@ def _hyprctl_json(*args: str):
     return json.loads(out)
 
 
-def _hyprland_rpcs3_geometry() -> str | None:
-    """Return 'x,y wxh' for a *visible* RPCS3 window, or None.
+def _hyprland_emulator_geometry(emulator: str = "rpcs3") -> str | None:
+    """Return 'x,y wxh' for a *visible* emulator window, or None.
 
-    grim captures screen regions, not window contents — so an RPCS3 window on
+    grim captures screen regions, not window contents — so an emulator window on
     another workspace (or hidden) would make us screenshot whatever is drawn
-    at those coordinates instead (e.g. your editor). Only consider rpcs3
+    at those coordinates instead (e.g. your editor). Only consider emulator
     windows that are mapped, not hidden, and on a currently-active workspace.
+
+    Args:
+        emulator: "rpcs3" (default) or "duckstation"
     """
     try:
         clients = _hyprctl_json("clients")
@@ -48,9 +55,15 @@ def _hyprland_rpcs3_geometry() -> str | None:
     active_ws = {m["activeWorkspace"]["id"] for m in monitors}
     special_ws = {m["specialWorkspace"]["id"] for m in monitors if m.get("specialWorkspace", {}).get("id")}
 
-    def is_rpcs3(c):
-        return ("rpcs3" in (c.get("class") or "").lower()
-                or "rpcs3" in (c.get("initialClass") or "").lower())
+    emulator_lower = emulator.lower()
+
+    def is_target_emulator(c):
+        cls = (c.get("class") or "").lower()
+        initial_cls = (c.get("initialClass") or "").lower()
+        title = (c.get("title") or "").lower()
+        return (emulator_lower in cls
+                or emulator_lower in initial_cls
+                or emulator_lower in title)
 
     def is_visible(c):
         ws = c.get("workspace", {}).get("id")
@@ -58,18 +71,18 @@ def _hyprland_rpcs3_geometry() -> str | None:
                 and not c.get("hidden", False)
                 and (ws in active_ws or ws in special_ws))
 
-    all_rpcs3 = [c for c in clients if is_rpcs3(c)]
-    visible = [c for c in all_rpcs3 if is_visible(c)]
+    all_emulator = [c for c in clients if is_target_emulator(c)]
+    visible = [c for c in all_emulator if is_visible(c)]
 
     if not visible:
-        if all_rpcs3:
-            ws_list = sorted({c.get("workspace", {}).get("name", "?") for c in all_rpcs3})
-            print(f"[capture] WARNING: RPCS3 window exists but is not visible "
+        if all_emulator:
+            ws_list = sorted({c.get("workspace", {}).get("name", "?") for c in all_emulator})
+            print(f"[capture] WARNING: {emulator} window exists but is not visible "
                   f"(on workspace(s) {ws_list}). Switch to it / unhide it — "
                   f"falling back to full-screen grab.")
         return None
 
-    # Prefer the biggest visible rpcs3 window (the game render window, not the GUI log).
+    # Prefer the biggest visible emulator window (the game render window, not GUI elements).
     best = max(visible, key=lambda c: c["size"][0] * c["size"][1])
     x, y = best["at"]
     w, h = best["size"]
@@ -80,7 +93,7 @@ def capture_frame() -> tuple[bytes, str]:
     raw: bytes | None = None
 
     if shutil.which("grim"):
-        geom = _hyprland_rpcs3_geometry()
+        geom = _hyprland_emulator_geometry(EMULATOR)
         cmd = ["grim", "-t", "png"]
         if geom:
             cmd += ["-g", geom]
